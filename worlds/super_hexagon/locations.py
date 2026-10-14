@@ -12,6 +12,14 @@ LEVELS = [
     "Hexagonest",
     "Hexagoner",
 ]
+# Indexed by the Goal option's value
+GOAL_LEVELS = [
+    "Hexagoner",
+    "Hexagonest",
+    "Hyper Hexagon",
+    "Hyper Hexagoner",
+    "Hyper Hexagonest",
+]
 LEVEL_CHECK_OFFSET = 100
 
 
@@ -27,7 +35,7 @@ class HexagonLocationData(NamedTuple):
 def _build_location_table() -> Dict[str, HexagonLocationData]:
     table: Dict[str, HexagonLocationData] = {}
     for level_idx, level in enumerate(LEVELS):
-        for time in range(0, SurvivalTime.range_end + 10, 10):
+        for time in range(10, SurvivalTime.range_end + 10, 10):
             table[f"{level}: {time} seconds"] = HexagonLocationData(
                 location_id=1 + level_idx * LEVEL_CHECK_OFFSET + time // 10,
                 region=level,

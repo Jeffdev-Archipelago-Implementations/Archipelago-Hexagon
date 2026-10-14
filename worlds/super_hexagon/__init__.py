@@ -2,10 +2,10 @@ from BaseClasses import Region, Tutorial
 from rule_builder.field_resolvers import FromOption
 from rule_builder.rules import CanReachRegion, Has, HasFromListUnique
 from worlds.AutoWorld import WebWorld, World
-from worlds.LauncherComponents import Component, Type, components, launch as launch_component
+from worlds.LauncherComponents import Component, Type, components, icon_paths, launch as launch_component
 
 from .items import HexagonItem, item_data_table, item_table
-from .locations import LEVELS, HexagonLocation, location_data_table, location_table
+from .locations import GOAL_LEVELS, LEVELS, HexagonLocation, location_data_table, location_table
 from .options import HexagonFragments, LevelsBeatRequired, SuperHexagonOptions
 
 
@@ -14,11 +14,14 @@ def _launch_client(*args: str) -> None:
     launch_component(launch, name="SuperHexagonClient", args=args)
 
 
+icon_paths["Super Hexagon"] = f"ap:{__name__}/assets/client_icon.png"
+
 components.append(Component(
     "Super Hexagon Client",
     func=_launch_client,
     component_type=Type.CLIENT,
     game_name="Super Hexagon",
+    icon="Super Hexagon",
 ))
 
 
@@ -28,8 +31,8 @@ class SuperHexagonWebWorld(WebWorld):
         tutorial_name="Setup Guide",
         description="A guide to playing Super Hexagon in Archipelago.",
         language="English",
-        file_name="guide_en.md",
-        link="guide/en",
+        file_name="setup_en.md",
+        link="setup/en",
         authors=["Jeffdev"],
     )]
 
@@ -104,7 +107,7 @@ class SuperHexagonWorld(World):
                 self.create_entrance(menu, region, Has(f"{level} Unlock"))
 
     def set_rules(self) -> None:
-        goal_level = LEVELS[self.options.goal.value + 1]
+        goal_level = GOAL_LEVELS[self.options.goal.value]
         unlock_items = [
             "Hexagoner Unlock",
             "Hexagonest Unlock",
@@ -128,4 +131,6 @@ class SuperHexagonWorld(World):
             "survival_time": int(self.options.survival_time),
             "levels_beat_required": int(self.options.levels_beat_required),
             "hexagon_fragments": int(self.options.hexagon_fragments),
+            "death_link": int(self.options.death_link),
+            "death_link_amnesty": int(self.options.death_link_amnesty)
         }

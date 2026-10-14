@@ -49,6 +49,15 @@ class HexagonFragments(Range):
     range_end = 10
     default = 5
 
+class DeathlinkAmnesty(Range):
+    """
+    The amount of deaths it takes for a deathlink to count.
+    """
+    display_name = "Deathlink Amnesty"
+    range_start = 1
+    range_end = 20
+    default = 10
+
 
 @dataclass
 class SuperHexagonOptions(PerGameCommonOptions):
@@ -57,3 +66,4 @@ class SuperHexagonOptions(PerGameCommonOptions):
     levels_beat_required: LevelsBeatRequired
     hexagon_fragments: HexagonFragments
     death_link: DeathLink
+    death_link_amnesty: DeathlinkAmnesty
