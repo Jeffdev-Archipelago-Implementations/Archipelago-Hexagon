@@ -21,6 +21,7 @@ class SurvivalTime(Range):
     The amount of time you are expected to survive in each level. This adjusts the check count, with every 10 seconds sending a check.
     Careful with this, as this game is pretty hard, and the Archipelago doesn't really help you survive longer!
     Your required goal time will be whatever this is set to.
+    Will round to the nearest 10 seconds, if its not set to a multiple of 10.
     """
     display_name = "Survival Time"
     range_start = 30

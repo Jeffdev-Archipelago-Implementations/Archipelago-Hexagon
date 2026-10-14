@@ -23,7 +23,7 @@ from CommonClient import (
 )
 
 from .items import item_table
-from .locations import LEVELS, TIMES, location_table
+from .locations import LEVELS, location_table
 
 # Game process
 PROCESS_NAME = "superhexagon.exe"
@@ -190,19 +190,19 @@ class SuperHexagonContext(CommonContext):
 
     # Location checking
 
-    def collect_location_checks(self, best_times: List[float]) -> List[int]:
-        """Return location IDs for every time milestone the player has reached."""
-        to_send: List[int] = []
-        for level_idx, level_name in enumerate(LEVELS):
-            best = best_times[level_idx]
-            for t in TIMES:
-                if best >= t:
-                    loc_name = f"{level_name}: {t} seconds"
-                    loc_id = location_table.get(loc_name)
-                    if loc_id is not None and loc_id not in self.checked_this_session:
-                        to_send.append(loc_id)
-                        self.checked_this_session.add(loc_id)
-        return to_send
+    # def collect_location_checks(self, best_times: List[float]) -> List[int]:
+    #     """Return location IDs for every time milestone the player has reached."""
+    #     to_send: List[int] = []
+    #     for level_idx, level_name in enumerate(LEVELS):
+    #         best = best_times[level_idx]
+    #         for t in TIMES:
+    #             if best >= t:
+    #                 loc_name = f"{level_name}: {t} seconds"
+    #                 loc_id = location_table.get(loc_name)
+    #                 if loc_id is not None and loc_id not in self.checked_this_session:
+    #                     to_send.append(loc_id)
+    #                     self.checked_this_session.add(loc_id)
+    #     return to_send
 
     # Text replacement
 
@@ -346,10 +346,10 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
             best_times = ctx.read_best_times()
 
             # Send new location checks
-            new_checks = ctx.collect_location_checks(best_times)
-            if new_checks:
-                combined = list(ctx.checked_locations) + new_checks
-                await ctx.send_msgs([{"cmd": "LocationChecks", "locations": new_checks}])
+            # new_checks = ctx.collect_location_checks(best_times)
+            # if new_checks:
+            #     combined = list(ctx.checked_locations) + new_checks
+            #     await ctx.send_msgs([{"cmd": "LocationChecks", "locations": new_checks}])
 
             # Goal check
             if not ctx.finished_game and ctx.is_goal_reached(best_times):

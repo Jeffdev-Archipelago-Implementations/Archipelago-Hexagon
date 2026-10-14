@@ -1,10 +1,12 @@
 from BaseClasses import Region, Tutorial
+from rule_builder.field_resolvers import FromOption
+from rule_builder.rules import CanReachRegion, Has, HasFromListUnique
 from worlds.AutoWorld import WebWorld, World
 from worlds.LauncherComponents import Component, Type, components, launch as launch_component
 
 from .items import HexagonItem, item_data_table, item_table
 from .locations import LEVELS, HexagonLocation, location_data_table, location_table
-from .options import SuperHexagonOptions
+from .options import HexagonFragments, LevelsBeatRequired, SuperHexagonOptions
 
 
 def _launch_client(*args: str) -> None:
@@ -47,10 +49,24 @@ class SuperHexagonWorld(World):
 
     def create_item(self, name: str) -> HexagonItem:
         data = item_data_table[name]
-        return HexagonItem(name, data.classification, data.code, self.player)
+        return HexagonItem(name, data.classification, data.item_id, self.player)
+
+    ut_can_gen_without_yaml = True
+
+    @staticmethod
+    def interpret_slot_data(slot_data: dict) -> dict:
+        return slot_data
 
     def generate_early(self) -> None:
-        self.push_precollected(self.create_item("Hexagon Unlock"))
+        slot_data = getattr(self.multiworld, "re_gen_passthrough", {}).get(self.game)
+        if slot_data:
+            self.options.goal.value = slot_data["goal"]
+            self.options.survival_time.value = slot_data["survival_time"]
+            self.options.levels_beat_required.value = slot_data["levels_beat_required"]
+            self.options.hexagon_fragments.value = slot_data["hexagon_fragments"]
+
+        # Round to a multiple of 10
+        self.options.survival_time.value = round(self.options.survival_time.value, -1)
 
     def create_items(self) -> None:
         unlock_names = [
@@ -65,7 +81,7 @@ class SuperHexagonWorld(World):
         for _ in range(self.options.hexagon_fragments.value):
             pool.append(self.create_item("Hexagon Fragment"))
         
-        filler_count = len(location_table) - len(pool)
+        filler_count = len(self.multiworld.get_unfilled_locations(self.player)) - len(pool)
         pool += [self.create_item(self.get_filler_item_name()) for _ in range(filler_count)]
         self.multiworld.itempool += pool
 
@@ -76,22 +92,19 @@ class SuperHexagonWorld(World):
         for level in LEVELS:
             region = Region(level, self.player, self.multiworld)
             region.locations += [
-                HexagonLocation(self.player, loc_name, loc_data.address, region)
+                HexagonLocation(self.player, loc_name, loc_data.location_id, region)
                 for loc_name, loc_data in location_data_table.items()
-                if loc_data.region == level
+                if loc_data.region == level and loc_data.time <= self.options.survival_time.value
             ]
             self.multiworld.regions.append(region)
 
             if level == "Hexagon":
-                menu.connect(region)
+                self.create_entrance(menu, region)
             else:
-                unlock_item = f"{level} Unlock"
-                entrance = menu.connect(region)
-                entrance.access_rule = lambda state, item=unlock_item: state.has(item, self.player)
+                self.create_entrance(menu, region, Has(f"{level} Unlock"))
 
     def set_rules(self) -> None:
-        goal_level = "Hexagonest" if self.options.goal == 0 else "Hyper Hexagonest"
-        goal_location = f"{goal_level}: {self.options.survival_time.value} seconds"
+        goal_level = LEVELS[self.options.goal.value + 1]
         unlock_items = [
             "Hexagoner Unlock",
             "Hexagonest Unlock",
@@ -99,14 +112,11 @@ class SuperHexagonWorld(World):
             "Hyper Hexagoner Unlock",
             "Hyper Hexagonest Unlock",
         ]
-        
-        levels_needed = self.options.levels_beat_required.value
-        fragments_needed = self.options.hexagon_fragments.value
-            
-        self.multiworld.completion_condition[self.player] = lambda state: (
-            state.can_reach_location(goal_location, self.player) and
-            state.has_from_list_unique(unlock_items, self.player, levels_needed) and
-            state.has("Hexagon Fragment", self.player, fragments_needed)
+
+        self.set_completion_rule(
+            CanReachRegion(goal_level)
+            & HasFromListUnique(*unlock_items, count=FromOption(LevelsBeatRequired))
+            & Has("Hexagon Fragment", count=FromOption(HexagonFragments))
         )
 
     def get_filler_item_name(self) -> str:

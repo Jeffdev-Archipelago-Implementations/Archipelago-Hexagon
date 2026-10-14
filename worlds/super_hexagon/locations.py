@@ -1,15 +1,18 @@
 from typing import Dict, NamedTuple
 
 from BaseClasses import Location
+from .options import SurvivalTime
 
+# In the ingame index order, cause its dumb
 LEVELS = [
     "Hexagon",
-    "Hexagoner",
-    "Hexagonest",
-    "Hyper Hexagon",
-    "Hyper Hexagoner",
     "Hyper Hexagonest",
+    "Hyper Hexagoner",
+    "Hyper Hexagon",
+    "Hexagonest",
+    "Hexagoner",
 ]
+LEVEL_CHECK_OFFSET = 100
 
 
 class HexagonLocation(Location):
@@ -19,19 +22,19 @@ class HexagonLocation(Location):
 class HexagonLocationData(NamedTuple):
     location_id: int
     region: str
-
+    time: int
 
 def _build_location_table() -> Dict[str, HexagonLocationData]:
     table: Dict[str, HexagonLocationData] = {}
-    times_list = range(0, self.options.survival_time.value, 10)
     for level_idx, level in enumerate(LEVELS):
-        for time_idx, time in enumerate(times_list):
-            name = f"{level}: {time} seconds"
-            table[name] = HexagonLocationData(
-                location_id=(level_idx + 1) * len(times_list) + time_idx,
+        for time in range(0, SurvivalTime.range_end + 10, 10):
+            table[f"{level}: {time} seconds"] = HexagonLocationData(
+                location_id=1 + level_idx * LEVEL_CHECK_OFFSET + time // 10,
                 region=level,
+                time=time,
             )
     return table
+
 
 
 location_data_table: Dict[str, HexagonLocationData] = _build_location_table()
