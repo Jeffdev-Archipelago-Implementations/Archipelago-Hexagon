@@ -34,9 +34,8 @@ class SuperHexagonWebWorld(WebWorld):
 
 class SuperHexagonWorld(World):
     """
-    Super Hexagon is a small indie game by Terry Cavanagh.
-    Avoid the walls of hexagons while surviving as long as you can!
-    Survive 60 seconds to complete levels.
+    Super Hexagon is a game where you play as a triangle avoiding dastardly hexagon walls.
+    You must survive at all costs!
     """
 
     game = "Super Hexagon"
@@ -62,8 +61,12 @@ class SuperHexagonWorld(World):
             "Hyper Hexagonest Unlock",
         ]
         pool = [self.create_item(name) for name in unlock_names]
+        
+        for _ in range(self.options.hexagon_fragments.value):
+            pool.append(self.create_item("Hexagon Fragment"))
+        
         filler_count = len(location_table) - len(pool)
-        pool += [self.create_item("Hexagon") for _ in range(filler_count)]
+        pool += [self.create_item(self.get_filler_item_name()) for _ in range(filler_count)]
         self.multiworld.itempool += pool
 
     def create_regions(self) -> None:
@@ -88,7 +91,7 @@ class SuperHexagonWorld(World):
 
     def set_rules(self) -> None:
         goal_level = "Hexagonest" if self.options.goal == 0 else "Hyper Hexagonest"
-        goal_location = f"{goal_level}: 60 seconds"
+        goal_location = f"{goal_level}: {self.options.survival_time.value} seconds"
         unlock_items = [
             "Hexagoner Unlock",
             "Hexagonest Unlock",
@@ -96,17 +99,23 @@ class SuperHexagonWorld(World):
             "Hyper Hexagoner Unlock",
             "Hyper Hexagonest Unlock",
         ]
+        
         levels_needed = self.options.levels_beat_required.value
+        fragments_needed = self.options.hexagon_fragments.value
+            
         self.multiworld.completion_condition[self.player] = lambda state: (
             state.can_reach_location(goal_location, self.player) and
-            state.has_from_list_unique(unlock_items, self.player, levels_needed)
+            state.has_from_list_unique(unlock_items, self.player, levels_needed) and
+            state.has("Hexagon Fragment", self.player, fragments_needed)
         )
 
     def get_filler_item_name(self) -> str:
-        return "Hexagon"
+        return "H E X A G O N"
 
     def fill_slot_data(self) -> dict:
         return {
             "goal": int(self.options.goal),
+            "survival_time": int(self.options.survival_time),
             "levels_beat_required": int(self.options.levels_beat_required),
+            "hexagon_fragments": int(self.options.hexagon_fragments),
         }

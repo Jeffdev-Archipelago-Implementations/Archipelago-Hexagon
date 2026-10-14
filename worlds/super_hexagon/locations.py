@@ -2,8 +2,6 @@ from typing import Dict, NamedTuple
 
 from BaseClasses import Location
 
-LOCATION_BASE_ID = 100
-
 LEVELS = [
     "Hexagon",
     "Hexagoner",
@@ -13,25 +11,24 @@ LEVELS = [
     "Hyper Hexagonest",
 ]
 
-TIMES = [10, 20, 30, 40, 50, 60]
-
 
 class HexagonLocation(Location):
     game = "Super Hexagon"
 
 
 class HexagonLocationData(NamedTuple):
-    address: int
+    location_id: int
     region: str
 
 
 def _build_location_table() -> Dict[str, HexagonLocationData]:
     table: Dict[str, HexagonLocationData] = {}
+    times_list = range(0, self.options.survival_time.value, 10)
     for level_idx, level in enumerate(LEVELS):
-        for time_idx, time in enumerate(TIMES):
+        for time_idx, time in enumerate(times_list):
             name = f"{level}: {time} seconds"
             table[name] = HexagonLocationData(
-                address=LOCATION_BASE_ID + level_idx * len(TIMES) + time_idx,
+                location_id=(level_idx + 1) * len(times_list) + time_idx,
                 region=level,
             )
     return table
@@ -39,4 +36,4 @@ def _build_location_table() -> Dict[str, HexagonLocationData]:
 
 location_data_table: Dict[str, HexagonLocationData] = _build_location_table()
 
-location_table: Dict[str, int] = {name: data.address for name, data in location_data_table.items()}
+location_table: Dict[str, int] = {name: data.location_id for name, data in location_data_table.items()}
