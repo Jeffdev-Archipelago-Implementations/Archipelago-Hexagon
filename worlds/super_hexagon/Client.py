@@ -322,7 +322,7 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
                     ctx.ptr = struct.unpack_from("I", ctx.mem.read_bytes(ctx.mem.process_base.lpBaseOfDll + PTR_GAME_OBJECT, 4))[0]
                     ctx.applied_unlocks.clear()
                     ctx.level_lock_installed = ctx.install_level_lock()
-                    logger.info("Connected to Super Hexagon.")
+                    logger.info("Connected to Super Hexagon. If the game closes, please restart this client.")
                     
                     # Re-apply all already-received unlocks on fresh hook
                     # await ctx._apply_received_items()
