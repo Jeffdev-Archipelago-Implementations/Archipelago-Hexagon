@@ -1,4 +1,4 @@
-from BaseClasses import Region, Tutorial
+from BaseClasses import ItemClassification, Region, Tutorial
 from rule_builder.field_resolvers import FromOption
 from rule_builder.rules import CanReachRegion, Has, HasFromListUnique
 from worlds.AutoWorld import WebWorld, World
@@ -91,6 +91,8 @@ class SuperHexagonWorld(World):
     def create_regions(self) -> None:
         menu = Region("Menu", self.player, self.multiworld)
         self.multiworld.regions.append(menu)
+        goal_level = GOAL_LEVELS[self.options.goal.value]
+        beaten_events = [f"{lvl} Beaten" for lvl in LEVELS if lvl != goal_level]
 
         for level in LEVELS:
             region = Region(level, self.player, self.multiworld)
@@ -101,26 +103,23 @@ class SuperHexagonWorld(World):
             ]
             self.multiworld.regions.append(region)
 
+            if level != goal_level:
+                event = HexagonLocation(self.player, f"{level} Beaten", None, region)
+                event.place_locked_item(HexagonItem(f"{level} Beaten", ItemClassification.progression, None, self.player))
+                region.locations.append(event)
+
             if level == "Hexagon":
                 self.create_entrance(menu, region)
+            elif level == goal_level: # Goal level is not accessible until we are in go mode
+                self.create_entrance(menu, region, Has(f"{level} Unlock")
+                                     & Has("Hexagon Fragment", count=FromOption(HexagonFragments))
+                                     & HasFromListUnique(*beaten_events, count=FromOption(LevelsBeatRequired)))
             else:
                 self.create_entrance(menu, region, Has(f"{level} Unlock"))
 
     def set_rules(self) -> None:
         goal_level = GOAL_LEVELS[self.options.goal.value]
-        unlock_items = [
-            "Hexagoner Unlock",
-            "Hexagonest Unlock",
-            "Hyper Hexagon Unlock",
-            "Hyper Hexagoner Unlock",
-            "Hyper Hexagonest Unlock",
-        ]
-
-        self.set_completion_rule(
-            CanReachRegion(goal_level)
-            & HasFromListUnique(*unlock_items, count=FromOption(LevelsBeatRequired))
-            & Has("Hexagon Fragment", count=FromOption(HexagonFragments))
-        )
+        self.set_completion_rule(CanReachRegion(goal_level))
 
     def get_filler_item_name(self) -> str:
         return "H E X A G O N"

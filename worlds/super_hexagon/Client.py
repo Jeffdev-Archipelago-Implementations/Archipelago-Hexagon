@@ -53,8 +53,10 @@ ADDR_MENU_TEXT: int = 0x56CC          # main menu "PRESS SPACE TO SELECT"
 ADDR_LEVEL_SELECT_TEXT: int = 0x5564  # level select "PRESS SPACE TO START"
 TEXT_LEN_OFFSET: int = 0x10
 TEXT_CAP_OFFSET: int = 0x14
+SSO_CAPACITY: int = 16  # strings with a smaller capacity are stored inline
 
-MENU_TEXT: bytes = b"CONNECT TO ARCHIPELAGO"
+MENU_TEXT: bytes = b"NOT CONNECTED TO ARCHIPELAGO"
+MENU_TEXT_CONNECTED: bytes = b"CONNECTED TO ARCHIPELAGO"
 LEVEL_SELECT_TEXT: bytes = b"PRESS SPACE TO START"
 LEVEL_SELECT_LOCKED_TEXT: bytes = b"LOCKED"
 
@@ -68,7 +70,23 @@ PATCH_MASK_ADDR: int = PATCH_ROUTINE_ADDR + 7  # lock mask inside the routine
 PAGE_EXECUTE_READWRITE: int = 0x40
 ALL_LEVELS_MASK: int = 0b111111  # one bit per level, 1 = locked
 
-# We use these to manually unlock these levels through the vanilla method, as we use our own locking system
+# Save lock patch
+SAVE_FUNCS: List[int] = [
+    0x1B550,  # scores.dat
+    0x1B6D0,  # suphex.dat
+]
+SAVE_FUNC_ORIGINAL: bytes = bytes.fromhex("55")  # push ebp
+SAVE_FUNC_PATCH: bytes = bytes.fromhex("c3")  # ret
+
+# Death collision patch
+DEATH_HOOK_SITE: int = 0x29B31
+DEATH_HOOK_ORIGINAL: bytes = bytes.fromhex("f30f108788290000")  # movss xmm0, [edi+0x2988]
+DEATH_HOOK: bytes = bytes.fromhex("e9b25e0c00909090")  # jump to our routine
+DEATH_ROUTINE_ADDR: int = 0xEF9E8  # unused space after the level lock routine
+DEATH_ROUTINE: bytes = bytes.fromhex("50b80000000085c058740ac787882900000000803ff30f108788290000e92fa1f3ff")
+DEATH_KILL_FLAG_ADDR: int = DEATH_ROUTINE_ADDR + 2  # kill flag inside the routine
+ADDR_DEATH_TIMER: int = 0x188  # nonzero from the moment of death until the game over screen
+
 HYPER_UNLOCK_FLAGS: Dict[int, int] = {
     3: 0x54C0,  # Hyper Hexagon
     2: 0x54C4,  # Hyper Hexagoner
@@ -108,12 +126,29 @@ class SuperHexagonCommandProcessor(ClientCommandProcessor):
         if isinstance(self.ctx, SuperHexagonContext):
             if self.ctx.game_connected:
                 logger.info("Connected to Super Hexagon.")
-                logger.info(f"Best times: {self.ctx.read_best_times()}")
-                logger.info(f"Current level: {self.ctx.read_current_level()}")
-                logger.info(f"Current time: {self.ctx.read_current_time()}")
-                logger.info(f"Death flag: {self.ctx.read_death_flag()}")
             else:
                 logger.info("Not connected to Super Hexagon, is the game running?")
+                
+    def _cmd_deathlink(self):
+        """Toggle Deathlink on or off."""
+        if isinstance(self.ctx, SuperHexagonContext):
+            if "DeathLink" in self.ctx.tags:
+                asyncio.create_task(self.ctx.update_death_link(False))
+            else:
+                asyncio.create_task(self.ctx.update_death_link(True))
+            logger.info(f"Deathlink {'enabled' if "DeathLink" not in self.ctx.tags else 'disabled'}.")
+            
+    def _cmd_deathlink_amnesty(self, value: string):
+        """Set the number of deaths it takes for a deathlink to send."""
+        if isinstance(self.ctx, SuperHexagonContext):
+            try:
+                if int(value) > 20:
+                    logger.warning("Deathlink Amnesty cannot be set higher than 20.")
+                    return
+                self.ctx.deathlink_amnesty = int(value)
+                logger.info(f"Deathlink Amnesty set to {value}.")
+            except ValueError:
+                logger.warning("Invalid value for Deathlink Amnesty. Please enter a valid integer.")
 
 # Context
 
@@ -137,11 +172,20 @@ class SuperHexagonContext(CommonContext):
         self.best_times: Dict[str, float] = {}  # read once per game_watcher tick, empty until restored
         self.deathlink_applied: bool = False
         self.deathlink_counter: int = 0
+        self.deathlink_amnesty: int = 10
+        self.death_hook_installed: bool = False
+        self.kill_flag_set: bool = False
+        self.was_dying: bool = False
         self.game_object_addr = None
         self.ptr = None
         self.level_lock_installed: bool = False
         self.lock_mask: Optional[int] = None  # mask currently written to the game
         self.text_too_long_warned: set = set()
+        self.save_block_installed: bool = False
+        self.original_save_values: Optional[Dict[int, int]] = None  # saved fields we overwrite, restored on exit
+        self.unsupported_warned: bool = False
+        self.save_block_pid: Optional[int] = None  # game process the save block was installed into
+        self.save_pending: bool = False  # a run ended, send any new records once the game over screen shows
 
     def make_gui(self):
         ui = super().make_gui()
@@ -172,6 +216,7 @@ class SuperHexagonContext(CommonContext):
                 "operations": [{"operation": "default", "value": None}],
             }]))
             self.set_notify(self.best_times_key)
+            self.deathlink_amnesty = self.slot_data.get("death_link_amnesty", 10)
             asyncio.create_task(self.update_death_link(bool(self.slot_data.get("death_link", 0))))
         if cmd in {"Connected", "ReceivedItems"}:
             asyncio.create_task(self._apply_received_items())
@@ -215,6 +260,9 @@ class SuperHexagonContext(CommonContext):
 
     def read_death_flag(self) -> bool:
         return self._read_float(self.ptr + ADDR_DEATH_FLAG) != 0
+
+    def is_dying(self) -> bool:
+        return self.read_game_state() == 0 and self._read_float(self.ptr + ADDR_DEATH_TIMER) != 0
 
     # Location checking
 
@@ -279,7 +327,11 @@ class SuperHexagonContext(CommonContext):
                 self.text_too_long_warned.add(text)
                 logger.warning(f"Text {text!r} is {len(text)} characters, only {capacity} fit, not shown.")
             return
-        chars_addr = self._read_uint32(self.ptr + string_addr)
+        # MSVC std::string keeps short strings inline instead of on the heap
+        if capacity < SSO_CAPACITY:
+            chars_addr = self.ptr + string_addr
+        else:
+            chars_addr = self._read_uint32(self.ptr + string_addr)
         if self.mem.read_bytes(chars_addr, len(text) + 1) == text + b"\x00":
             return
         self.mem.write_bytes(chars_addr, text + b"\x00", len(text) + 1)
@@ -328,8 +380,84 @@ class SuperHexagonContext(CommonContext):
         self.level_lock_installed = False
         self.lock_mask = None
 
+    # Save block patch
+
+    def install_save_block(self) -> bool:
+        """Stop the game from saving. Returns False if the game doesn't match."""
+        base = self.mem.process_base.lpBaseOfDll
+        sites = [self.mem.read_bytes(base + func, len(SAVE_FUNC_PATCH)) for func in SAVE_FUNCS]
+        if any(site not in (SAVE_FUNC_ORIGINAL, SAVE_FUNC_PATCH) for site in sites):
+            return False
+        if SAVE_FUNC_PATCH in sites and self.save_block_pid == self.mem.process_id:
+            pass
+        elif SAVE_FUNC_PATCH in sites:
+            # Left over from a client that didn't exit cleanly
+            logger.warning("Super Hexagon was patched by a previous client session. "
+                           "Restart the game after closing this client so your save isn't overwritten.")
+            self.original_save_values = None
+        else:
+            self.original_save_values = {}  # captured once the game object exists
+        for func in SAVE_FUNCS:
+            self._write_code(base + func, SAVE_FUNC_PATCH)
+        self.save_block_installed = True
+        self.save_block_pid = self.mem.process_id
+        return True
+
+    def capture_save_values(self) -> None:
+        """Remember the real values of every saved field the client overwrites."""
+        if self.original_save_values == {}:
+            offsets = list(ADDR_BEST_TIMES.values()) + list(HYPER_UNLOCK_FLAGS.values())
+            self.original_save_values = {offset: self._read_uint32(self.ptr + offset) for offset in offsets}
+
+    def uninstall_save_block(self) -> None:
+        """Put the real values back, then let the game save again."""
+        if not self.original_save_values:  # unknown originals, leave saving off until the game restarts
+            logger.warning("Saving stays disabled until Super Hexagon is restarted.")
+            return
+        ptr = self._read_uint32(self.mem.process_base.lpBaseOfDll + PTR_GAME_OBJECT)
+        for offset, value in self.original_save_values.items():
+            self._write_uint32(ptr + offset, value)
+        for func in SAVE_FUNCS:
+            self._write_code(self.mem.process_base.lpBaseOfDll + func, SAVE_FUNC_ORIGINAL)
+        self.save_block_installed = False
+
+    # Death patch
+
+    def install_death_hook(self) -> bool:
+        """Install the death patch with the kill flag off. Returns False if the game doesn't match."""
+        base = self.mem.process_base.lpBaseOfDll
+        site = self.mem.read_bytes(base + DEATH_HOOK_SITE, len(DEATH_HOOK))
+        routine_area = self.mem.read_bytes(base + DEATH_ROUTINE_ADDR, len(DEATH_ROUTINE))
+
+        unpatched = site == DEATH_HOOK_ORIGINAL and routine_area == bytes(len(DEATH_ROUTINE))
+        flag_start = DEATH_KILL_FLAG_ADDR - DEATH_ROUTINE_ADDR
+        already_patched = (site == DEATH_HOOK 
+                           and routine_area[:flag_start] == DEATH_ROUTINE[:flag_start]
+                           and routine_area[flag_start + 4:] == DEATH_ROUTINE[flag_start + 4:])
+        if not (unpatched or already_patched):
+            logger.warning("Unrecognised Super Hexagon version, receiving DeathLinks is disabled.")
+            return False
+
+        self._write_code(base + DEATH_ROUTINE_ADDR, DEATH_ROUTINE)
+        self._write_code(base + DEATH_HOOK_SITE, DEATH_HOOK)
+        self.kill_flag_set = False
+        return True
+
+    def uninstall_death_hook(self) -> None:
+        """Restore the original game code."""
+        base = self.mem.process_base.lpBaseOfDll
+        self._write_code(base + DEATH_HOOK_SITE, DEATH_HOOK_ORIGINAL)
+        self._write_code(base + DEATH_ROUTINE_ADDR, bytes(len(DEATH_ROUTINE)))
+        self.death_hook_installed = False
+        self.kill_flag_set = False
+
+    def set_kill_flag(self, on: bool) -> None:
+        self._write_code(self.mem.process_base.lpBaseOfDll + DEATH_KILL_FLAG_ADDR, struct.pack("<I", int(on)))
+        self.kill_flag_set = on
+
     def unlocked_menu_indices(self) -> set:
         unlocked = set()
+        unlocked.add(LEVEL_NAME_TO_INDEX["Hexagon"]) # Hexagon is always unlocked
         for network_item in self.items_received:
             item_name = self.item_names.lookup_in_game(network_item.item)
             if item_name in UNLOCK_ITEM_TO_LEVEL_INDEX:
@@ -405,6 +533,23 @@ class SuperHexagonContext(CommonContext):
     def is_goal_reached(self, best_times: Dict[str, float]) -> bool:
         goal_level = GOAL_LEVELS[self.slot_data.get("goal", 0)]
         return best_times[goal_level] >= self.slot_data.get("survival_time", 60.0)
+    
+    # Deathlink
+    def on_deathlink(self, data: dict) -> None:
+        super().on_deathlink(data)
+        if self.game_connected and self.ptr:
+            try:
+                if self.read_game_state() == 0:  # in game
+                    self.kill_player()
+            except Exception as e:
+                logger.warning(f"Could not apply DeathLink: {e}")
+    
+    def kill_player(self) -> None:
+        """Make the game think the player hit a wall, so it plays its own death sequence."""
+        if not self.death_hook_installed:
+            return
+        self.deathlink_applied = True  # so game_watcher doesn't count or resend this death
+        self.set_kill_flag(True)
 
 # Game-watcher loop
 
@@ -417,6 +562,14 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
             if not ctx.game_connected:
                 try:
                     ctx.mem = pymem.Pymem(PROCESS_NAME)
+                    # Never touch the player's save, so don't hook a game we can't stop from saving
+                    if not ctx.install_save_block():
+                        if not ctx.unsupported_warned:
+                            logger.error("Unrecognised Super Hexagon version.")
+                            ctx.unsupported_warned = True
+                        ctx.mem = None
+                        await asyncio.sleep(3)
+                        continue
                     ctx.game_connected = True
                     ctx.game_object_addr = ctx.mem.process_base.lpBaseOfDll + PTR_GAME_OBJECT if ctx.mem else None
                     ctx.ptr = struct.unpack_from("I", ctx.mem.read_bytes(ctx.mem.process_base.lpBaseOfDll + PTR_GAME_OBJECT, 4))[0]
@@ -424,6 +577,9 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
                     ctx.best_times_restored = False
                     ctx.best_times = {}
                     ctx.level_lock_installed = ctx.install_level_lock()
+                    ctx.death_hook_installed = ctx.install_death_hook()
+                    ctx.was_dying = False
+                    ctx.save_pending = False
                     logger.info("Connected to Super Hexagon. If the game closes, please restart this client.")
                     
                     await ctx._apply_received_items()
@@ -436,6 +592,8 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
                 await asyncio.sleep(0.5)
                 continue
 
+            ctx.capture_save_values()
+
             if ctx.level_lock_installed:
                 ctx.update_level_lock()
 
@@ -446,23 +604,32 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
             # Sync best times with DataStorage
             if not ctx.best_times_restored:
                 ctx.restore_best_times()
-            if ctx.best_times_restored:
-                await ctx.save_best_times()
 
             # Read game state
             best_times = ctx.read_best_times()
             ctx.best_times = best_times if ctx.best_times_restored else {}
 
-            # DeathLink (currently only one way until I figure out how to make it apply to us)
-            if "DeathLink" in ctx.tags:
-                if ctx.read_death_flag() and ctx.deathlink_applied == False:
+            # Deaths
+            dying = ctx.is_dying()
+            if ctx.kill_flag_set and (dying or ctx.read_game_state() != 0):
+                ctx.set_kill_flag(False)  # the death has started, turn it off so the next run isn't killed too
+                if not dying:  # left the level before the kill happened
+                    ctx.deathlink_applied = False
+            if dying and not ctx.was_dying:
+                ctx.save_pending = True
+                if ctx.deathlink_applied:  # caused by a received DeathLink, don't count or resend it
+                    ctx.deathlink_applied = False
+                elif "DeathLink" in ctx.tags:
                     ctx.deathlink_counter += 1
-                    if ctx.deathlink_counter >= ctx.slot_data.get("death_link_amnesty", 10):
+                    if ctx.deathlink_counter >= ctx.deathlink_amnesty:
                         await ctx.send_death(f"{ctx.player_names[ctx.slot]} crashed into a hexagon on {LEVELS[ctx.read_current_level()]}.")
                         ctx.deathlink_counter = 0
-                    ctx.deathlink_applied = True
-                elif ctx.read_death_flag() == False and ctx.deathlink_applied == True:
-                    ctx.deathlink_applied = False
+            ctx.was_dying = dying
+
+            # Send any new records once the run is over and the game over screen shows them
+            if ctx.save_pending and ctx.best_times_restored and ctx.read_game_state() != 0:
+                await ctx.save_best_times()
+                ctx.save_pending = False
 
             # Send new location checks
             if ctx.best_times_restored:
@@ -486,10 +653,16 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
 
 async def level_select_watcher(ctx: SuperHexagonContext) -> None:
     """Fast loop for text replacement."""
+    last_error: Optional[str] = None
     while not ctx.exit_event.is_set():
         try:
+            if ctx.game_connected and ctx.mem:
+                ctx.ptr = ctx._read_uint32(ctx.mem.process_base.lpBaseOfDll + PTR_GAME_OBJECT)
             if ctx.game_connected and ctx.ptr:
-                ctx.write_text(ADDR_MENU_TEXT, MENU_TEXT)
+                if ctx.slot is not None:
+                    ctx.write_text(ADDR_MENU_TEXT, MENU_TEXT_CONNECTED)
+                else:
+                    ctx.write_text(ADDR_MENU_TEXT, MENU_TEXT)
 
                 if ctx.read_game_state() == 1:  # In level select
                     level = ctx.read_current_level()
@@ -501,9 +674,12 @@ async def level_select_watcher(ctx: SuperHexagonContext) -> None:
                     else:
                         text = LEVEL_SELECT_LOCKED_TEXT
                     ctx.write_text(ADDR_LEVEL_SELECT_TEXT, text)
+            last_error = None
 
         except Exception as e:
-            logger.warning(f"Level select watcher: {e}")
+            if ctx.game_connected and str(e) != last_error:
+                logger.debug(f"Level select watcher: {e}")
+            last_error = str(e)
 
         await asyncio.sleep(LEVEL_SELECT_POLL)
 
@@ -534,6 +710,16 @@ def launch(*args: str) -> None:
                 ctx.uninstall_level_lock()
             except Exception as e:
                 logger.warning(f"Could not remove level lock: {e}")
+        if ctx.game_connected and ctx.death_hook_installed:
+            try:
+                ctx.uninstall_death_hook()
+            except Exception as e:
+                logger.warning(f"Could not remove death patch: {e}")
+        if ctx.game_connected and ctx.save_block_installed:
+            try:
+                ctx.uninstall_save_block()
+            except Exception as e:
+                logger.warning(f"Could not restore your save values, restart Super Hexagon before playing: {e}")
         await ctx.shutdown()
 
     parser = get_base_parser(description="Super Hexagon Archipelago Client")

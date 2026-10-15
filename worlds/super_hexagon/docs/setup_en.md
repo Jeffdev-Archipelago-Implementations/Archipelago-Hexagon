@@ -2,7 +2,7 @@
 
 ## Requirements
 - Windows OS (Hard required. Client is using memory reading / writing / allocation through Windows APIs)
-- Super Hexagon through steam specifically.
+- Super Hexagon through Steam specifically (see below for hashes)
 - Archipelago 0.6.7+
 
 **Hashes of expected Super Hexagon.exe**
@@ -10,11 +10,11 @@
 ```
 Name: SuperHexagon.exe
 Size: bytes ( KiB)
-CRC32:
-CRC64:
-SHA256:
-SHA1:
-BLAKE2sp:
+CRC32: 96995E03
+CRC64: 5FB5FF28B4F37E65
+SHA256: 72b0c26053c37edd3435def461e9027cd6ffad12032db2fd0b32c256fdbee6b9
+SHA1: 52d19762a3596f45dab112e279c2744ca532dab6
+BLAKE2sp: 9c2989cdfca5eeccda5651ef1a67ad073662917db0cb6bfd9cc2da7b168b6e6d
 ```
 
 ## Game Setup Instructions
