@@ -9,7 +9,6 @@
 
 ```
 Name: SuperHexagon.exe
-Size: bytes ( KiB)
 CRC32: 96995E03
 CRC64: 5FB5FF28B4F37E65
 SHA256: 72b0c26053c37edd3435def461e9027cd6ffad12032db2fd0b32c256fdbee6b9
