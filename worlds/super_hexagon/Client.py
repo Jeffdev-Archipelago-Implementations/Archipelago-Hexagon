@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import struct
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pymem
 from pymem.ressources.kernel32 import VirtualProtectEx
@@ -32,7 +32,7 @@ except ImportError:
     from CommonClient import ClientCommandProcessor, CommonContext
 
 from .items import item_table
-from .locations import GOAL_LEVELS, LEVELS, location_data_table, location_table
+from .locations import LEVELS, OPTION_LEVELS, SURVIVAL_TIME_KEYS, location_data_table, location_table
 
 # Game process
 PROCESS_NAME = "superhexagon.exe"
@@ -47,6 +47,7 @@ ADDR_CURRENT_LEVEL: int = 0x54F4
 ADDR_GAME_STATE: int = 0x4C
 ADDR_CURRENT_TIME: int = 0x2924 
 ADDR_DEATH_FLAG: float = 0x2988
+ADDR_FIRST_TIME_FLAG = 0x1B4B0
 
 # Text Memory Addresses
 ADDR_MENU_TEXT: int = 0x56CC          # main menu "PRESS SPACE TO SELECT"
@@ -87,10 +88,41 @@ DEATH_ROUTINE: bytes = bytes.fromhex("50b80000000085c058740ac787882900000000803f
 DEATH_KILL_FLAG_ADDR: int = DEATH_ROUTINE_ADDR + 2  # kill flag inside the routine
 ADDR_DEATH_TIMER: int = 0x188  # nonzero from the moment of death until the game over screen
 
+# Stage complete patch (skips unlocking stuff when you beat the normal levels)
+STAGE_COMPLETE_PATCHES: List[Tuple[int, bytes, bytes]] = [  # site, original, patched
+    (0x1B4D3, bytes.fromhex("7574"), bytes.fromhex("eb74")),  # normal mode: jne -> jmp past the unlock
+    (0x1B518, bytes.fromhex("752f"), bytes.fromhex("eb2f")),  # hyper mode: jne -> jmp past the finish
+    # Fix the ending bar text checking for hexagonest level, instead just check for the color scheme to display text properly
+    # Otherwise the bar is just full white lol
+    (0xB5AA, bytes.fromhex("83bba454000002"),   # cmp dword ptr [ebx + 0x54a4], 2   (stage)
+             bytes.fromhex("83bbd42701001e")),  # cmp dword ptr [ebx + 0x127d4], 30 (colour scheme)
+]
+
+# Game over banner: "CONGRATULATIONS" with a second line picked by type
+ADDR_COMPLETE_BANNER: int = 0x5750        # 0 none, 1 new hyper mode, 2 game complete, 3 hyper level complete
+ADDR_COMPLETE_BANNER_STAGE: int = 0x5754  # stage the banner is for (0-2)
+BANNER_GAME_COMPLETE: int = 2
+ADDR_ENDING_FLAG: int = 0x54FC  # 1 plays the ending cutscene when the current run ends, 2 while it plays
+ENDING_PLAYING: int = 2
+
+# Hyper things
+
 HYPER_UNLOCK_FLAGS: Dict[int, int] = {
     3: 0x54C0,  # Hyper Hexagon
     2: 0x54C4,  # Hyper Hexagoner
     1: 0x54C8,  # Hyper Hexagonest
+}
+
+# The game's own hyper lock text
+HYPER_LOCK_TEXT: Dict[int, Tuple[int, bytes]] = {
+    3: (0xF1550, b"COMPLETE HEXAGON TO UNLOCK"),     # Hyper Hexagon
+    2: (0xF156C, b"COMPLETE HEXAGONER TO UNLOCK"),   # Hyper Hexagoner
+    1: (0xF158C, b"COMPLETE HEXAGONEST TO UNLOCK"),  # Hyper Hexagonest
+}
+HYPER_DISABLED_TEXT: Dict[int, Tuple[int, bytes]] = {
+    3: (0xF1550, b"HYPER HEXAGON DISABLED"), 
+    2: (0xF156C, b"HYPER HEXAGONER DISABLED"),
+    1: (0xF158C, b"HYPER HEXAGONEST DISABLED"),
 }
 
 # Best times per level
@@ -110,13 +142,7 @@ ADDR_BEST_TIMES: Dict[str, int] = {
 LEVEL_NAME_TO_INDEX: Dict[str, int] = {level: i for i, level in enumerate(LEVELS)}
 
 # These are mapped to the in game indexes
-UNLOCK_ITEM_TO_LEVEL_INDEX: Dict[str, int] = {
-    "Hexagoner Unlock":        5,
-    "Hexagonest Unlock":       4,
-    "Hyper Hexagon Unlock":    3,
-    "Hyper Hexagoner Unlock":  2,
-    "Hyper Hexagonest Unlock": 1,
-}
+UNLOCK_ITEM_TO_LEVEL_INDEX: Dict[str, int] = {f"{level} Unlock": i for i, level in enumerate(LEVELS)}
 
 # Status Command
 
@@ -138,7 +164,7 @@ class SuperHexagonCommandProcessor(ClientCommandProcessor):
                 asyncio.create_task(self.ctx.update_death_link(True))
             logger.info(f"Deathlink {'enabled' if "DeathLink" not in self.ctx.tags else 'disabled'}.")
             
-    def _cmd_deathlink_amnesty(self, value: string):
+    def _cmd_deathlink_amnesty(self, value):
         """Set the number of deaths it takes for a deathlink to send."""
         if isinstance(self.ctx, SuperHexagonContext):
             try:
@@ -149,6 +175,49 @@ class SuperHexagonCommandProcessor(ClientCommandProcessor):
                 logger.info(f"Deathlink Amnesty set to {value}.")
             except ValueError:
                 logger.warning("Invalid value for Deathlink Amnesty. Please enter a valid integer.")
+
+    def _cmd_survival_times(self):
+        """Show the expected survival time for each level."""
+        if isinstance(self.ctx, SuperHexagonContext):
+            if self.ctx.slot is None:
+                logger.info("Connect to a slot to see your survival times.")
+                return
+            disabled = self.ctx.slot_data.get("disable_hyper_levels", [])
+            lines = []
+            for level in OPTION_LEVELS:
+                if level in disabled:
+                    lines.append(f"{level}: Disabled")
+                    continue
+                line = f"{level}: {self.ctx.survival_time(level)}s"
+                if level == self.ctx.goal_level:
+                    line += f" (Goal Time: {self.ctx.slot_data.get('goal_time', 60)}s)"
+                lines.append(line)
+            logger.info("Survival times:\n" + "\n".join(lines))
+
+    def _cmd_goal(self):
+        """Show your goal time, if your goal level is available, and your fragments/levels beaten."""
+        if isinstance(self.ctx, SuperHexagonContext):
+            if self.ctx.slot is None:
+                logger.info("Connect to a slot to see your goal.")
+                return
+            ctx = self.ctx
+            goal = ctx.goal_level
+            has_unlock = any(ctx.item_names.lookup_in_game(item.item) == f"{goal} Unlock"
+                             for item in ctx.items_received)
+            fragments_needed = ctx.slot_data.get("hexagon_fragments", 0)
+            beaten_needed = ctx.slot_data.get("levels_beat_required", 0)
+            lines = [
+                f"Goal: Survive {ctx.slot_data.get('goal_time', 60)}s in {goal}",
+                f"{goal} Unlock: {'Received' if has_unlock else 'Not received'}",
+            ]
+            if fragments_needed:
+                lines.append(f"Hexagon Fragments: {ctx.fragments_received()}/{fragments_needed}")
+            if beaten_needed:
+                beaten = f"{ctx.levels_beaten()}/{beaten_needed}"
+                if not ctx.best_times:
+                    beaten += " (connect the game to see your times)"
+                lines.append(f"Levels beaten: {beaten}")
+            logger.info("\n".join(lines))
 
 # Context
 
@@ -174,12 +243,15 @@ class SuperHexagonContext(CommonContext):
         self.deathlink_counter: int = 0
         self.deathlink_amnesty: int = 10
         self.death_hook_installed: bool = False
+        self.stage_complete_patched: bool = False
+        self.game_complete_started: bool = False  # banner and ending set up for the goal run
         self.kill_flag_set: bool = False
         self.was_dying: bool = False
         self.game_object_addr = None
         self.ptr = None
         self.level_lock_installed: bool = False
         self.lock_mask: Optional[int] = None  # mask currently written to the game
+        self.disabled_text_written: set = set()  # hyper levels currently showing their disabled text
         self.text_too_long_warned: set = set()
         self.save_block_installed: bool = False
         self.original_save_values: Optional[Dict[int, int]] = None  # saved fields we overwrite, restored on exit
@@ -325,7 +397,6 @@ class SuperHexagonContext(CommonContext):
         if capacity < len(text):
             if text not in self.text_too_long_warned:
                 self.text_too_long_warned.add(text)
-                logger.warning(f"Text {text!r} is {len(text)} characters, only {capacity} fit, not shown.")
             return
         # MSVC std::string keeps short strings inline instead of on the heap
         if capacity < SSO_CAPACITY:
@@ -370,6 +441,7 @@ class SuperHexagonContext(CommonContext):
         self._write_code(base + PATCH_ROUTINE_ADDR, PATCH_ROUTINE)
         self._write_code(base + PATCH_SITE, PATCH_HOOK)
         self.lock_mask = ALL_LEVELS_MASK
+        self.disabled_text_written.clear()
         return True
 
     def uninstall_level_lock(self) -> None:
@@ -377,6 +449,10 @@ class SuperHexagonContext(CommonContext):
         base = self.mem.process_base.lpBaseOfDll
         self._write_code(base + PATCH_SITE, PATCH_SITE_ORIGINAL)
         self._write_code(base + PATCH_ROUTINE_ADDR, bytes(len(PATCH_ROUTINE)))
+        for index in self.disabled_text_written:
+            addr, original = HYPER_LOCK_TEXT[index]
+            self._write_code(base + addr, original + b"\x00")
+        self.disabled_text_written.clear()
         self.level_lock_installed = False
         self.lock_mask = None
 
@@ -451,20 +527,53 @@ class SuperHexagonContext(CommonContext):
         self.death_hook_installed = False
         self.kill_flag_set = False
 
+    # Stage complete patch
+
+    def install_stage_complete_patch(self) -> bool:
+        """Stop the game unlocking hyper levels and showing its own banners. Returns False if the game doesn't match."""
+        base = self.mem.process_base.lpBaseOfDll
+        sites = [self.mem.read_bytes(base + site, len(original)) for site, original, _ in STAGE_COMPLETE_PATCHES]
+        if any(current not in (original, patched)
+               for current, (_, original, patched) in zip(sites, STAGE_COMPLETE_PATCHES)):
+            logger.warning("Unrecognised Super Hexagon version, the game's own level complete banners stay on.")
+            return False
+        for site, _, patched in STAGE_COMPLETE_PATCHES:
+            self._write_code(base + site, patched)
+        return True
+
+    def uninstall_stage_complete_patch(self) -> None:
+        """Restore the original game code."""
+        base = self.mem.process_base.lpBaseOfDll
+        for site, original, _ in STAGE_COMPLETE_PATCHES:
+            self._write_code(base + site, original)
+        self.stage_complete_patched = False
+
+    def start_game_complete(self) -> None:
+        """Setup game completion cutscene once this run ends."""
+        self._write_uint32(self.ptr + ADDR_COMPLETE_BANNER_STAGE, 2)
+        self._write_uint32(self.ptr + ADDR_COMPLETE_BANNER, BANNER_GAME_COMPLETE)
+        self._write_uint32(self.ptr + ADDR_ENDING_FLAG, 1)
+        self.game_complete_started = True
+
+    def goal_time_passed_this_run(self) -> bool:
+        """In a run on the goal level and past the goal time."""
+        return (self.read_game_state() == 0
+                and LEVELS[self.read_current_level()] == self.goal_level
+                and self.read_current_time() / FRAMES_PER_SECOND >= self.slot_data.get("goal_time", 60))
+
     def set_kill_flag(self, on: bool) -> None:
         self._write_code(self.mem.process_base.lpBaseOfDll + DEATH_KILL_FLAG_ADDR, struct.pack("<I", int(on)))
         self.kill_flag_set = on
 
     def unlocked_menu_indices(self) -> set:
         unlocked = set()
-        unlocked.add(LEVEL_NAME_TO_INDEX["Hexagon"]) # Hexagon is always unlocked
+        unlocked.add(LEVEL_NAME_TO_INDEX[self.start_level]) # The starting level is always unlocked
         for network_item in self.items_received:
             item_name = self.item_names.lookup_in_game(network_item.item)
             if item_name in UNLOCK_ITEM_TO_LEVEL_INDEX:
                 unlocked.add(UNLOCK_ITEM_TO_LEVEL_INDEX[item_name])
 
-        if (self.fragments_received() < self.slot_data.get("hexagon_fragments", 0)
-                or self.levels_beaten() < self.slot_data.get("levels_beat_required", 0)):
+        if not self.goal_requirements_met():
             unlocked.discard(self.goal_menu_index())
         return unlocked
 
@@ -480,20 +589,48 @@ class SuperHexagonContext(CommonContext):
             self._write_code(self.mem.process_base.lpBaseOfDll + PATCH_MASK_ADDR, struct.pack("<I", mask))
             self.lock_mask = mask
 
+        disabled = self.disabled_menu_indices() if self.slot is not None else set()
         for index, flag_addr in HYPER_UNLOCK_FLAGS.items():
-            if index in unlocked and self._read_uint32(self.ptr + flag_addr) != 1:
+            if index in disabled:
+                # Use the game's own hyper lock for disabled levels
+                if self._read_uint32(self.ptr + flag_addr) != 0:
+                    self._write_uint32(self.ptr + flag_addr, 0)
+            elif index in unlocked and self._read_uint32(self.ptr + flag_addr) != 1:
                 self._write_uint32(self.ptr + flag_addr, 1)
+
+        # Add in custom text for disabled levels
+        base = self.mem.process_base.lpBaseOfDll
+        for index, (addr, original) in HYPER_LOCK_TEXT.items():
+            if index in disabled and index not in self.disabled_text_written:
+                self._write_code(base + addr, HYPER_DISABLED_TEXT[index][1] + b"\x00")
+                self.disabled_text_written.add(index)
+            elif index not in disabled and index in self.disabled_text_written:
+                self._write_code(base + addr, original + b"\x00")
+                self.disabled_text_written.discard(index)
+
+    def disabled_menu_indices(self) -> set:
+        return {LEVEL_NAME_TO_INDEX[level] for level in self.slot_data.get("disable_hyper_levels", [])}
 
     def is_level_locked(self, menu_index: int) -> bool:
         return self.lock_mask is not None and bool(self.lock_mask & (1 << menu_index))
 
+    @property
+    def goal_level(self) -> str:
+        return OPTION_LEVELS[self.slot_data.get("goal", 2)]
+
+    @property
+    def start_level(self) -> str:
+        return OPTION_LEVELS[self.slot_data.get("starting_level", 0)]
+
+    def survival_time(self, level: str) -> int:
+        return self.slot_data.get(SURVIVAL_TIME_KEYS[level], 60)
+
     def goal_menu_index(self) -> int:
-        goal_level = GOAL_LEVELS[self.slot_data.get("goal", 0)]
-        return UNLOCK_ITEM_TO_LEVEL_INDEX[f"{goal_level} Unlock"]
+        return LEVEL_NAME_TO_INDEX[self.goal_level]
 
     def goal_locked_text(self) -> bytes:
         """Locked text for the goal level"""
-        text = "GOAL:"
+        text = f"GOAL:"
         fragments_needed = self.slot_data.get("hexagon_fragments", 0)
         if fragments_needed:
             fragments = self.fragments_received()
@@ -502,6 +639,8 @@ class SuperHexagonContext(CommonContext):
         if beaten_needed:
             beaten = self.levels_beaten()
             text += f" {min(beaten, beaten_needed)}/{beaten_needed} LEVELS"
+        if text == "GOAL:":
+            text += " NEEDS UNLOCK"
         return text.encode()
 
     # Item things
@@ -526,13 +665,17 @@ class SuperHexagonContext(CommonContext):
                     if self.item_names.lookup_in_game(item.item) == "Hexagon Fragment")
 
     def levels_beaten(self) -> int:
-        goal_level = GOAL_LEVELS[self.slot_data.get("goal", 0)]
-        survival_time = self.slot_data.get("survival_time", 60)
-        return sum(1 for lvl, t in self.best_times.items() if lvl != goal_level and t >= survival_time)
+        disabled = self.slot_data.get("disable_hyper_levels", [])
+        return sum(1 for lvl, t in self.best_times.items()
+                   if lvl != self.goal_level and lvl not in disabled and t >= self.survival_time(lvl))
+
+    def goal_requirements_met(self) -> bool:
+        return (self.fragments_received() >= self.slot_data.get("hexagon_fragments", 0)
+                and self.levels_beaten() >= self.slot_data.get("levels_beat_required", 0))
 
     def is_goal_reached(self, best_times: Dict[str, float]) -> bool:
-        goal_level = GOAL_LEVELS[self.slot_data.get("goal", 0)]
-        return best_times[goal_level] >= self.slot_data.get("survival_time", 60.0)
+        # The goal level stays locked until the requirements are met, so being able to play it is enough
+        return best_times[self.goal_level] >= self.slot_data.get("goal_time", 60)
     
     # Deathlink
     def on_deathlink(self, data: dict) -> None:
@@ -578,6 +721,7 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
                     ctx.best_times = {}
                     ctx.level_lock_installed = ctx.install_level_lock()
                     ctx.death_hook_installed = ctx.install_death_hook()
+                    ctx.stage_complete_patched = ctx.install_stage_complete_patch()
                     ctx.was_dying = False
                     ctx.save_pending = False
                     logger.info("Connected to Super Hexagon. If the game closes, please restart this client.")
@@ -637,8 +781,19 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
                 if new_checks:
                     ctx.checked_this_session.update(await ctx.check_locations(new_checks))
 
-            # Goal check, only once the game shows this slot's times, not whatever was saved locally before
-            if ctx.best_times_restored and not ctx.finished_game and ctx.is_goal_reached(best_times):
+            # Start the game complete sequence if we've passed the goal time in this run
+            if (ctx.best_times_restored and ctx.slot is not None and not ctx.finished_game
+                    and not ctx.game_complete_started and ctx.goal_time_passed_this_run()):
+                ctx.start_game_complete()
+
+            # If we started the game complete sequence, get the goal ready
+            if ctx.game_complete_started:
+                goal_ready = (ctx._read_uint32(ctx.ptr + ADDR_ENDING_FLAG) != 1
+                              or ctx.read_game_state() == 1)
+            # Otherwise, only once the game shows this slot's times, not whatever was saved locally before
+            else:
+                goal_ready = ctx.best_times_restored and ctx.is_goal_reached(best_times)
+            if goal_ready and not ctx.finished_game:
                 await ctx.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
                 ctx.finished_game = True
                 logger.info("Goal completed!")
@@ -715,6 +870,11 @@ def launch(*args: str) -> None:
                 ctx.uninstall_death_hook()
             except Exception as e:
                 logger.warning(f"Could not remove death patch: {e}")
+        if ctx.game_connected and ctx.stage_complete_patched:
+            try:
+                ctx.uninstall_stage_complete_patch()
+            except Exception as e:
+                logger.warning(f"Could not remove stage complete patch: {e}")
         if ctx.game_connected and ctx.save_block_installed:
             try:
                 ctx.uninstall_save_block()
