@@ -785,7 +785,9 @@ async def game_watcher(ctx: SuperHexagonContext) -> None:
             if (ctx.best_times_restored and ctx.slot is not None and not ctx.finished_game
                     and not ctx.game_complete_started and ctx.goal_time_passed_this_run()):
                 ctx.start_game_complete()
-
+            elif not ctx.game_complete_started:
+                ctx._write_uint32(ctx.ptr + ADDR_ENDING_FLAG, 0) # Forces the game complete flag to be off
+                
             # If we started the game complete sequence, get the goal ready
             if ctx.game_complete_started:
                 goal_ready = (ctx._read_uint32(ctx.ptr + ADDR_ENDING_FLAG) != 1
